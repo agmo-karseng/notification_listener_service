@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.os.Bundle;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.text.TextUtils;
 import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
@@ -43,17 +44,24 @@ public class Action implements Parcelable {
         this.packageName = packageName;
         this.p = p;
         this.isQuickReply = isQuickReply;
-        remoteInputs.add(new RemoteInputParcel(remoteInput));
+        if (remoteInput != null) {
+            remoteInputs.add(new RemoteInputParcel(remoteInput));
+        }
     }
 
     public Action(NotificationCompat.Action action, String packageName, boolean isQuickReply) {
-        this.text = action.title.toString();
+        CharSequence title = action.title;
+        this.text = title == null ? "" : title.toString();
         this.packageName = packageName;
         this.p = action.actionIntent;
         if (action.getRemoteInputs() != null) {
             int size = action.getRemoteInputs().length;
-            for (int i = 0; i < size; i++)
-                remoteInputs.add(new RemoteInputParcel(action.getRemoteInputs()[i]));
+            for (int i = 0; i < size; i++) {
+                RemoteInput remoteInput = action.getRemoteInputs()[i];
+                if (remoteInput != null) {
+                    remoteInputs.add(new RemoteInputParcel(remoteInput));
+                }
+            }
         }
         this.isQuickReply = isQuickReply;
     }
@@ -64,13 +72,18 @@ public class Action implements Parcelable {
         ArrayList<RemoteInput> actualInputs = new ArrayList<>();
 
         for (RemoteInputParcel input : remoteInputs) {
+            if (TextUtils.isEmpty(input.getResultKey())) {
+                continue;
+            }
             Log.i("", "RemoteInput: " + input.getLabel());
             bundle.putCharSequence(input.getResultKey(), msg);
             RemoteInput.Builder builder = new RemoteInput.Builder(input.getResultKey());
             builder.setLabel(input.getLabel());
             builder.setChoices(input.getChoices());
             builder.setAllowFreeFormInput(input.isAllowFreeFormInput());
-            builder.addExtras(input.getExtras());
+            if (input.getExtras() != null) {
+                builder.addExtras(input.getExtras());
+            }
             actualInputs.add(builder.build());
         }
 
