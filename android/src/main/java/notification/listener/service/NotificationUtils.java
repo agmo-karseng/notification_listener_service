@@ -42,6 +42,9 @@ public final class NotificationUtils {
             String[] names = flat.split(":");
             for (String name : names) {
                 ComponentName componentName = ComponentName.unflattenFromString(name);
+                if (componentName == null) {
+                    continue;
+                }
                 boolean nameMatch = TextUtils.equals(packageName, componentName.getPackageName());
                 if (nameMatch) {
                     return true;
@@ -53,6 +56,9 @@ public final class NotificationUtils {
 
     @RequiresApi(api = Build.VERSION_CODES.KITKAT)
     public static Action getQuickReplyAction(Notification n, String packageName) {
+        if (n == null) {
+            return null;
+        }
         NotificationCompat.Action action = null;
         if (Build.VERSION.SDK_INT >= 24)
             action = getQuickReplyAction(n);
@@ -66,10 +72,10 @@ public final class NotificationUtils {
     private static NotificationCompat.Action getQuickReplyAction(Notification n) {
         for (int i = 0; i < NotificationCompat.getActionCount(n); i++) {
             NotificationCompat.Action action = NotificationCompat.getAction(n, i);
-            if (action.getRemoteInputs() != null) {
+            if (action != null && action.getRemoteInputs() != null) {
                 for (int x = 0; x < action.getRemoteInputs().length; x++) {
                     RemoteInput remoteInput = action.getRemoteInputs()[x];
-                    if (isKnownReplyKey(remoteInput.getResultKey()))
+                    if (remoteInput != null && isKnownReplyKey(remoteInput.getResultKey()))
                         return action;
                 }
             }
@@ -80,12 +86,16 @@ public final class NotificationUtils {
     private static NotificationCompat.Action getWearReplyAction(Notification n) {
         NotificationCompat.WearableExtender wearableExtender = new NotificationCompat.WearableExtender(n);
         for (NotificationCompat.Action action : wearableExtender.getActions()) {
-            if (action.getRemoteInputs() != null) {
+            if (action != null && action.getRemoteInputs() != null) {
                 for (int x = 0; x < action.getRemoteInputs().length; x++) {
                     RemoteInput remoteInput = action.getRemoteInputs()[x];
-                    if (isKnownReplyKey(remoteInput.getResultKey()))
+                    if (remoteInput == null) {
+                        continue;
+                    }
+                    String resultKey = remoteInput.getResultKey();
+                    if (isKnownReplyKey(resultKey))
                         return action;
-                    else if (remoteInput.getResultKey().toLowerCase().contains(INPUT_KEYWORD))
+                    else if (!TextUtils.isEmpty(resultKey) && resultKey.toLowerCase().contains(INPUT_KEYWORD))
                         return action;
                 }
             }

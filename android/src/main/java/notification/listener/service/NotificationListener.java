@@ -59,15 +59,19 @@ public class NotificationListener extends NotificationListenerService {
 
     @RequiresApi(api = VERSION_CODES.KITKAT)
     private void handleNotification(StatusBarNotification notification, boolean isRemoved) {
+        if (notification == null || notification.getNotification() == null) {
+            return;
+        }
         String packageName = notification.getPackageName();
-        Bundle extras = notification.getNotification().extras;
-        boolean isOngoing = (notification.getNotification().flags & Notification.FLAG_ONGOING_EVENT) != 0;
+        Notification androidNotification = notification.getNotification();
+        Bundle extras = androidNotification.extras;
+        boolean isOngoing = (androidNotification.flags & Notification.FLAG_ONGOING_EVENT) != 0;
         byte[] appIcon = getAppIcon(packageName);
         byte[] largeIcon = null;
-        Action action = NotificationUtils.getQuickReplyAction(notification.getNotification(), packageName);
+        Action action = isRemoved ? null : NotificationUtils.getQuickReplyAction(androidNotification, packageName);
 
         if (Build.VERSION.SDK_INT >= VERSION_CODES.M) {
-            largeIcon = getNotificationLargeIcon(getApplicationContext(), notification.getNotification());
+            largeIcon = getNotificationLargeIcon(getApplicationContext(), androidNotification);
         }
 
         Intent intent = new Intent(NotificationConstants.INTENT);
@@ -76,7 +80,9 @@ public class NotificationListener extends NotificationListenerService {
         intent.putExtra(NotificationConstants.CAN_REPLY, action != null);
         intent.putExtra(NotificationConstants.IS_ONGOING, isOngoing);
 
-        if (NotificationUtils.getQuickReplyAction(notification.getNotification(), packageName) != null) {
+        if (isRemoved) {
+            cachedNotifications.remove(notification.getId());
+        } else if (action != null) {
             cachedNotifications.put(notification.getId(), action);
         }
 
