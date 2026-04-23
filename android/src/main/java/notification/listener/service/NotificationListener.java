@@ -15,6 +15,7 @@ import android.graphics.drawable.Icon;
 import android.os.Build;
 import android.os.Build.VERSION_CODES;
 import android.os.Bundle;
+import android.os.TransactionTooLargeException;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 import android.util.Log;
@@ -26,6 +27,7 @@ import java.util.HashMap;
 import androidx.annotation.RequiresApi;
 
 import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 
 import notification.listener.service.models.Action;
 
@@ -33,6 +35,13 @@ import notification.listener.service.models.Action;
 @SuppressLint("OverrideAbstract")
 @RequiresApi(api = VERSION_CODES.JELLY_BEAN_MR2)
 public class NotificationListener extends NotificationListenerService {
+    private static final String TAG = "NotificationListener";
+    // Keep payload significantly under binder's practical transaction ceiling.
+    private static final int MAX_BROADCAST_PAYLOAD_BYTES = 700 * 1024;
+    private static final int MAX_ICON_BYTES = 120 * 1024;
+    private static final int MAX_LARGE_ICON_BYTES = 180 * 1024;
+    private static final int MAX_EXTRA_PICTURE_BYTES = 280 * 1024;
+
     private static NotificationListener instance;
 
     public static NotificationListener getInstance() {
@@ -74,6 +83,9 @@ public class NotificationListener extends NotificationListenerService {
             largeIcon = getNotificationLargeIcon(getApplicationContext(), androidNotification);
         }
 
+        appIcon = trimBlob(appIcon, MAX_ICON_BYTES, "appIcon");
+        largeIcon = trimBlob(largeIcon, MAX_LARGE_ICON_BYTES, "largeIcon");
+
         Intent intent = new Intent(NotificationConstants.INTENT);
         intent.putExtra(NotificationConstants.PACKAGE_NAME, packageName);
         intent.putExtra(NotificationConstants.ID, notification.getId());
@@ -89,27 +101,127 @@ public class NotificationListener extends NotificationListenerService {
         intent.putExtra(NotificationConstants.NOTIFICATIONS_ICON, appIcon);
         intent.putExtra(NotificationConstants.NOTIFICATIONS_LARGE_ICON, largeIcon);
 
+        String titleStr = null;
+        String textStr = null;
+        byte[] extrasPicture = null;
+        boolean haveExtraPicture = false;
+
         if (extras != null) {
             CharSequence title = extras.getCharSequence(Notification.EXTRA_TITLE);
             CharSequence text = extras.getCharSequence(Notification.EXTRA_TEXT);
+            titleStr = title == null ? null : title.toString();
+            textStr = text == null ? null : text.toString();
 
-            intent.putExtra(NotificationConstants.NOTIFICATION_TITLE, title == null ? null : title.toString());
-            intent.putExtra(NotificationConstants.NOTIFICATION_CONTENT, text == null ? null : text.toString());
+            intent.putExtra(NotificationConstants.NOTIFICATION_TITLE, titleStr);
+            intent.putExtra(NotificationConstants.NOTIFICATION_CONTENT, textStr);
             intent.putExtra(NotificationConstants.IS_REMOVED, isRemoved);
-            intent.putExtra(NotificationConstants.HAVE_EXTRA_PICTURE, extras.containsKey(Notification.EXTRA_PICTURE));
-
             if (extras.containsKey(Notification.EXTRA_PICTURE)) {
                 Bitmap bmp = (Bitmap) extras.get(Notification.EXTRA_PICTURE);
                 if (bmp != null) {
                     ByteArrayOutputStream stream = new ByteArrayOutputStream();
-                    bmp.compress(Bitmap.CompressFormat.PNG, 100, stream);
-                    intent.putExtra(NotificationConstants.EXTRAS_PICTURE, stream.toByteArray());
+                    // JPEG keeps transaction size lower than PNG for large photos.
+                    bmp.compress(Bitmap.CompressFormat.JPEG, 70, stream);
+                    extrasPicture = trimBlob(stream.toByteArray(), MAX_EXTRA_PICTURE_BYTES, "extraPicture");
+                    haveExtraPicture = extrasPicture != null;
                 } else {
-                    Log.w("NotificationListener", "Notification.EXTRA_PICTURE exists but is null.");
+                    Log.w(TAG, "Notification.EXTRA_PICTURE exists but is null.");
                 }
             }
         }
-        sendBroadcast(intent);
+        intent.putExtra(NotificationConstants.HAVE_EXTRA_PICTURE, haveExtraPicture);
+        if (extrasPicture != null) {
+            intent.putExtra(NotificationConstants.EXTRAS_PICTURE, extrasPicture);
+        }
+
+        // Final guard: drop heavy extras if transaction estimate is still large.
+        int estimate = estimatePayloadBytes(packageName, titleStr, textStr, appIcon, largeIcon, extrasPicture);
+        if (estimate > MAX_BROADCAST_PAYLOAD_BYTES) {
+            intent.removeExtra(NotificationConstants.EXTRAS_PICTURE);
+            intent.putExtra(NotificationConstants.HAVE_EXTRA_PICTURE, false);
+            extrasPicture = null;
+            estimate = estimatePayloadBytes(packageName, titleStr, textStr, appIcon, largeIcon, null);
+        }
+        if (estimate > MAX_BROADCAST_PAYLOAD_BYTES) {
+            intent.removeExtra(NotificationConstants.NOTIFICATIONS_LARGE_ICON);
+            largeIcon = null;
+            estimate = estimatePayloadBytes(packageName, titleStr, textStr, appIcon, null, null);
+        }
+        if (estimate > MAX_BROADCAST_PAYLOAD_BYTES) {
+            intent.removeExtra(NotificationConstants.NOTIFICATIONS_ICON);
+            appIcon = null;
+        }
+
+        dispatchWithFallback(intent, packageName, notification.getId(), action != null, isOngoing, isRemoved, titleStr, textStr);
+    }
+
+    private void dispatchWithFallback(
+            Intent intent,
+            String packageName,
+            int notificationId,
+            boolean canReply,
+            boolean isOngoing,
+            boolean isRemoved,
+            String title,
+            String content
+    ) {
+        try {
+            sendBroadcast(intent);
+        } catch (RuntimeException e) {
+            if (!isTransactionTooLarge(e)) {
+                throw e;
+            }
+            Log.w(TAG, "TransactionTooLargeException while broadcasting notification. Sending lightweight payload.", e);
+            Intent fallbackIntent = new Intent(NotificationConstants.INTENT);
+            fallbackIntent.putExtra(NotificationConstants.PACKAGE_NAME, packageName);
+            fallbackIntent.putExtra(NotificationConstants.ID, notificationId);
+            fallbackIntent.putExtra(NotificationConstants.CAN_REPLY, canReply);
+            fallbackIntent.putExtra(NotificationConstants.IS_ONGOING, isOngoing);
+            fallbackIntent.putExtra(NotificationConstants.IS_REMOVED, isRemoved);
+            fallbackIntent.putExtra(NotificationConstants.NOTIFICATION_TITLE, title);
+            fallbackIntent.putExtra(NotificationConstants.NOTIFICATION_CONTENT, content);
+            fallbackIntent.putExtra(NotificationConstants.HAVE_EXTRA_PICTURE, false);
+            sendBroadcast(fallbackIntent);
+        }
+    }
+
+    private boolean isTransactionTooLarge(Throwable throwable) {
+        while (throwable != null) {
+            if (throwable instanceof TransactionTooLargeException) {
+                return true;
+            }
+            throwable = throwable.getCause();
+        }
+        return false;
+    }
+
+    private byte[] trimBlob(byte[] blob, int maxBytes, String fieldName) {
+        if (blob == null || blob.length <= maxBytes) {
+            return blob;
+        }
+        Log.w(TAG, "Dropping oversized " + fieldName + " payload (" + blob.length + " bytes)");
+        return null;
+    }
+
+    private int estimatePayloadBytes(
+            String packageName,
+            String title,
+            String content,
+            byte[] appIcon,
+            byte[] largeIcon,
+            byte[] extrasPicture
+    ) {
+        int bytes = 4 * 1024; // binder and bundle overhead buffer
+        bytes += safeStringBytes(packageName);
+        bytes += safeStringBytes(title);
+        bytes += safeStringBytes(content);
+        bytes += appIcon == null ? 0 : appIcon.length;
+        bytes += largeIcon == null ? 0 : largeIcon.length;
+        bytes += extrasPicture == null ? 0 : extrasPicture.length;
+        return bytes;
+    }
+
+    private int safeStringBytes(String value) {
+        return value == null ? 0 : value.getBytes(StandardCharsets.UTF_8).length;
     }
 
 
